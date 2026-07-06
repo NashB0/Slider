@@ -29,7 +29,13 @@ class _PantallaFotosState extends State<PantallaFotos> {
   bool _cargando = true;
   bool _sinPermiso = false;
   List<AssetEntity> _fotos = [];
+  int _indice = 0;
   Uint8List? _miniatura;
+  bool _cargandoMini = false;
+
+  final List<AssetEntity> _paraBorrar = [];
+  final List<AssetEntity> _favoritos = [];
+  int _guardadas = 0;
 
   @override
   void initState() {
@@ -66,69 +72,176 @@ class _PantallaFotosState extends State<PantallaFotos> {
       end: total,
     );
 
-    Uint8List? mini;
-    if (lista.isNotEmpty) {
-      mini = await lista[0].thumbnailDataWithSize(
-        const ThumbnailSize(600, 600),
-      );
-    }
-
     setState(() {
       _cargando = false;
       _fotos = lista;
-      _miniatura = mini;
+      _indice = 0;
     });
+
+    await _cargarMiniatura();
+  }
+
+  Future<void> _cargarMiniatura() async {
+    if (_indice >= _fotos.length) {
+      setState(() {
+        _miniatura = null;
+      });
+      return;
+    }
+    setState(() {
+      _cargandoMini = true;
+    });
+    final mini = await _fotos[_indice].thumbnailDataWithSize(
+      const ThumbnailSize(600, 600),
+    );
+    if (!mounted) return;
+    setState(() {
+      _miniatura = mini;
+      _cargandoMini = false;
+    });
+  }
+
+  void _accion(String tipo) {
+    if (_indice >= _fotos.length) return;
+    final actual = _fotos[_indice];
+    if (tipo == 'borrar') {
+      _paraBorrar.add(actual);
+    } else if (tipo == 'guardar') {
+      _guardadas++;
+    } else if (tipo == 'favorito') {
+      _favoritos.add(actual);
+    }
+    setState(() {
+      _indice++;
+      _miniatura = null;
+    });
+    _cargarMiniatura();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Slider')),
-      body: Center(child: _construirCuerpo()),
+      body: SafeArea(child: _construirCuerpo()),
     );
   }
 
   Widget _construirCuerpo() {
     if (_cargando) {
-      return const CircularProgressIndicator();
+      return const Center(child: CircularProgressIndicator());
     }
     if (_sinPermiso) {
-      return Padding(
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Slider necesita permiso para ver tus fotos.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: () => PhotoManager.openSetting(),
+                child: const Text('Abrir ajustes'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    if (_fotos.isEmpty) {
+      return const Center(child: Text('No se encontraron fotos ni videos.'));
+    }
+    if (_indice >= _fotos.length) {
+      return _construirResumen();
+    }
+    return _construirRevisor();
+  }
+
+  Widget _construirRevisor() {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: Text(
+            'Archivo ${_indice + 1} de ${_fotos.length}',
+            style: const TextStyle(fontSize: 16),
+          ),
+        ),
+        Expanded(
+          child: GestureDetector(
+            onHorizontalDragEnd: (details) {
+              final v = details.primaryVelocity ?? 0;
+              if (v < 0) {
+                _accion('borrar');
+              } else if (v > 0) {
+                _accion('guardar');
+              }
+            },
+            onVerticalDragEnd: (details) {
+              final v = details.primaryVelocity ?? 0;
+              if (v < 0) {
+                _accion('favorito');
+              }
+            },
+            child: Container(
+              width: double.infinity,
+              color: Colors.black12,
+              alignment: Alignment.center,
+              child: _cargandoMini || _miniatura == null
+                  ? const CircularProgressIndicator()
+                  : Image.memory(_miniatura!, fit: BoxFit.contain),
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
+          child: Column(
+            children: [
+              const Text(
+                '←  Borrar          Guardar  →',
+                style: TextStyle(fontSize: 15),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                '↑  Favorito',
+                style: TextStyle(fontSize: 15),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Para borrar: ${_paraBorrar.length}   ·   '
+                'Guardadas: $_guardadas   ·   '
+                'Favoritos: ${_favoritos.length}',
+                style: const TextStyle(fontSize: 13, color: Colors.grey),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _construirResumen() {
+    return Center(
+      child: Padding(
         padding: const EdgeInsets.all(24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             const Text(
-              'Slider necesita permiso para ver tus fotos.',
+              '¡Revisaste todos los archivos!',
+              style: TextStyle(fontSize: 20),
               textAlign: TextAlign.center,
             ),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed: () => PhotoManager.openSetting(),
-              child: const Text('Abrir ajustes'),
-            ),
+            const SizedBox(height: 20),
+            Text('Marcadas para borrar: ${_paraBorrar.length}'),
+            Text('Guardadas: $_guardadas'),
+            Text('Favoritos: ${_favoritos.length}'),
           ],
         ),
-      );
-    }
-    if (_fotos.isEmpty) {
-      return const Text('No se encontraron fotos ni videos.');
-    }
-
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Text('Se encontraron ${_fotos.length} archivos'),
-        const SizedBox(height: 16),
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: _miniatura == null
-                ? const Text('No se pudo cargar la vista previa.')
-                : Image.memory(_miniatura!, fit: BoxFit.contain),
-          ),
-        ),
-      ],
+      ),
     );
   }
 }
