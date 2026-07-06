@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:photo_manager/photo_manager.dart';
 
@@ -28,6 +29,7 @@ class _PantallaFotosState extends State<PantallaFotos> {
   bool _cargando = true;
   bool _sinPermiso = false;
   List<AssetEntity> _fotos = [];
+  Uint8List? _miniatura;
 
   @override
   void initState() {
@@ -64,9 +66,17 @@ class _PantallaFotosState extends State<PantallaFotos> {
       end: total,
     );
 
+    Uint8List? mini;
+    if (lista.isNotEmpty) {
+      mini = await lista[0].thumbnailDataWithSize(
+        const ThumbnailSize(600, 600),
+      );
+    }
+
     setState(() {
       _cargando = false;
       _fotos = lista;
+      _miniatura = mini;
     });
   }
 
@@ -113,11 +123,9 @@ class _PantallaFotosState extends State<PantallaFotos> {
         Expanded(
           child: Padding(
             padding: const EdgeInsets.all(16),
-            child: AssetEntityImage(
-              _fotos[0],
-              isOriginal: false,
-              fit: BoxFit.contain,
-            ),
+            child: _miniatura == null
+                ? const Text('No se pudo cargar la vista previa.')
+                : Image.memory(_miniatura!, fit: BoxFit.contain),
           ),
         ),
       ],
