@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_card_swiper/flutter_card_swiper.dart';
@@ -22,19 +21,21 @@ class SliderApp extends StatelessWidget {
         scaffoldBackgroundColor: const Color(0xFF11131A),
         useMaterial3: true,
       ),
-      home: const PantallaFotos(),
+      home: const PantallaPrincipal(),
     );
   }
 }
 
-class PantallaFotos extends StatefulWidget {
-  const PantallaFotos({super.key});
+enum Vista { revisar, paraBorrar, guardadas, favoritos }
+
+class PantallaPrincipal extends StatefulWidget {
+  const PantallaPrincipal({super.key});
 
   @override
-  State<PantallaFotos> createState() => _PantallaFotosState();
+  State<PantallaPrincipal> createState() => _PantallaPrincipalState();
 }
 
-class _PantallaFotosState extends State<PantallaFotos> {
+class _PantallaPrincipalState extends State<PantallaPrincipal> {
   static const _kBorrar = 'slider_para_borrar';
   static const _kGuardadas = 'slider_guardadas';
   static const _kFavoritos = 'slider_favoritos';
@@ -44,8 +45,11 @@ class _PantallaFotosState extends State<PantallaFotos> {
 
   bool _cargando = true;
   bool _sinPermiso = false;
-  bool _borrando = false;
+  bool _ocupado = false;
 
+  Vista _vista = Vista.revisar;
+
+  List<AssetEntity> _todas = [];
   List<AssetEntity> _pendientes = [];
 
   Set<String> _idsBorrar = {};
@@ -101,6 +105,7 @@ class _PantallaFotosState extends State<PantallaFotos> {
     if (albums.isEmpty) {
       setState(() {
         _cargando = false;
+        _todas = [];
         _pendientes = [];
       });
       return;
@@ -109,27 +114,47 @@ class _PantallaFotosState extends State<PantallaFotos> {
     final total = await albums[0].assetCountAsync;
     final todas = await albums[0].getAssetListRange(start: 0, end: total);
 
-    final decididos = <String>{}
-      ..addAll(_idsGuardadas)
-      ..addAll(_idsFavoritos)
-      ..addAll(_idsBorrar);
-
-    final pendientes =
-        todas.where((a) => !decididos.contains(a.id)).toList();
-
     if (!mounted) return;
     setState(() {
       _cargando = false;
-      _pendientes = pendientes;
+      _todas = todas;
+      _pendientes = _calcularPendientes(todas);
       _controlador = CardSwiperController();
     });
   }
 
-  Future<Uint8List?> _mini(AssetEntity asset) async {
-    if (_cache.containsKey(asset.id)) return _cache[asset.id];
-    final datos =
-        await asset.thumbnailDataWithSize(const ThumbnailSize(800, 800));
-    if (datos != null) _cache[asset.id] = datos;
+  List<AssetEntity> _calcularPendientes(List<AssetEntity> todas) {
+    final decididos = <String>{}
+      ..addAll(_idsGuardadas)
+      ..addAll(_idsFavoritos)
+      ..addAll(_idsBorrar);
+    return todas.where((a) => !decididos.contains(a.id)).toList();
+  }
+
+  void _recalcular() {
+    setState(() {
+      _pendientes = _calcularPendientes(_todas);
+      _controlador = CardSwiperController();
+    });
+  }
+
+  List<AssetEntity> _listaDe(Vista v) {
+    late Set<String> ids;
+    if (v == Vista.paraBorrar) {
+      ids = _idsBorrar;
+    } else if (v == Vista.guardadas) {
+      ids = _idsGuardadas;
+    } else {
+      ids = _idsFavoritos;
+    }
+    return _todas.where((a) => ids.contains(a.id)).toList();
+  }
+
+  Future<Uint8List?> _mini(AssetEntity asset, [int tam = 800]) async {
+    final clave = '${asset.id}_$tam';
+    if (_cache.containsKey(clave)) return _cache[clave];
+    final datos = await asset.thumbnailDataWithSize(ThumbnailSize(tam, tam));
+    if (datos != null) _cache[clave] = datos;
     return datos;
   }
 
@@ -147,6 +172,45 @@ class _PantallaFotosState extends State<PantallaFotos> {
     });
     _guardarEstado();
     return true;
+  }
+
+  Future<void> _quitarDeLista(AssetEntity asset, Vista v) async {
+    final nombre = v == Vista.paraBorrar
+        ? 'Para borrar'
+        : v == Vista.guardadas
+            ? 'Guardadas'
+            : 'Favoritos';
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Deshacer'),
+        content: Text(
+          'Sacar este archivo de "$nombre".\n\n'
+          'Va a volver a la pila de pendientes para que lo revises de nuevo.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Deshacer'),
+          ),
+        ],
+      ),
+    );
+
+    if (ok != true) return;
+
+    setState(() {
+      _idsBorrar.remove(asset.id);
+      _idsGuardadas.remove(asset.id);
+      _idsFavoritos.remove(asset.id);
+    });
+    await _guardarEstado();
+    _recalcular();
   }
 
   Future<void> _borrarMarcadas() async {
@@ -175,7 +239,7 @@ class _PantallaFotosState extends State<PantallaFotos> {
 
     if (confirmar != true) return;
 
-    setState(() => _borrando = true);
+    setState(() => _ocupado = true);
 
     final borrados =
         await PhotoManager.editor.deleteWithIds(_idsBorrar.toList());
@@ -184,7 +248,7 @@ class _PantallaFotosState extends State<PantallaFotos> {
     await _guardarEstado();
 
     if (!mounted) return;
-    setState(() => _borrando = false);
+    setState(() => _ocupado = false);
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -199,35 +263,80 @@ class _PantallaFotosState extends State<PantallaFotos> {
     await _cargarFotos();
   }
 
+  String get _titulo {
+    switch (_vista) {
+      case Vista.revisar:
+        return 'Slider';
+      case Vista.paraBorrar:
+        return 'Para borrar';
+      case Vista.guardadas:
+        return 'Guardadas';
+      case Vista.favoritos:
+        return 'Favoritos';
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Slider'),
+        title: Text(_titulo),
         backgroundColor: Colors.transparent,
-        actions: [
-          if (_idsBorrar.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: TextButton.icon(
-                onPressed: _borrando ? null : _borrarMarcadas,
-                icon: const Icon(Icons.delete_forever,
-                    color: Colors.redAccent),
-                label: Text(
-                  '${_idsBorrar.length}',
-                  style: const TextStyle(
-                      color: Colors.redAccent, fontSize: 16),
-                ),
-              ),
-            ),
-        ],
       ),
+      drawer: _menu(),
       body: SafeArea(child: _cuerpo()),
     );
   }
 
+  Widget _menu() {
+    return Drawer(
+      backgroundColor: const Color(0xFF1B1F2A),
+      child: ListView(
+        padding: EdgeInsets.zero,
+        children: [
+          const DrawerHeader(
+            decoration: BoxDecoration(color: Color(0xFF232838)),
+            child: Align(
+              alignment: Alignment.bottomLeft,
+              child: Text(
+                'Slider',
+                style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ),
+          _itemMenu(Icons.style, 'Revisar', _pendientes.length, Vista.revisar),
+          _itemMenu(Icons.delete_outline, 'Para borrar', _idsBorrar.length,
+              Vista.paraBorrar),
+          _itemMenu(Icons.check_circle_outline, 'Guardadas',
+              _idsGuardadas.length, Vista.guardadas),
+          _itemMenu(Icons.star_outline, 'Favoritos', _idsFavoritos.length,
+              Vista.favoritos),
+        ],
+      ),
+    );
+  }
+
+  Widget _itemMenu(IconData icono, String texto, int cantidad, Vista v) {
+    final activo = _vista == v;
+    return ListTile(
+      leading: Icon(icono, color: activo ? Colors.amber : Colors.white70),
+      title: Text(
+        texto,
+        style: TextStyle(color: activo ? Colors.amber : Colors.white),
+      ),
+      trailing: Text(
+        '$cantidad',
+        style: const TextStyle(color: Colors.white54),
+      ),
+      onTap: () {
+        setState(() => _vista = v);
+        Navigator.pop(context);
+      },
+    );
+  }
+
   Widget _cuerpo() {
-    if (_cargando || _borrando) {
+    if (_cargando || _ocupado) {
       return const Center(child: CircularProgressIndicator());
     }
     if (_sinPermiso) {
@@ -251,8 +360,34 @@ class _PantallaFotosState extends State<PantallaFotos> {
         ),
       );
     }
+
+    if (_vista == Vista.revisar) return _vistaRevisar();
+    return _vistaLista(_vista);
+  }
+
+  Widget _vistaRevisar() {
     if (_pendientes.isEmpty) {
-      return _sinPendientes();
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.check_circle_outline,
+                  color: Colors.greenAccent, size: 64),
+              const SizedBox(height: 16),
+              const Text('No hay archivos pendientes',
+                  style: TextStyle(fontSize: 20)),
+              const SizedBox(height: 12),
+              const Text(
+                'Abrí el menú ☰ para ver tus listas.',
+                style: TextStyle(color: Colors.white54),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      );
     }
 
     return Column(
@@ -288,36 +423,88 @@ class _PantallaFotosState extends State<PantallaFotos> {
     );
   }
 
-  Widget _sinPendientes() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.check_circle_outline,
-                color: Colors.greenAccent, size: 64),
-            const SizedBox(height: 16),
-            const Text('No hay archivos pendientes',
-                style: TextStyle(fontSize: 20), textAlign: TextAlign.center),
-            const SizedBox(height: 20),
-            Text('Marcados para borrar: ${_idsBorrar.length}'),
-            Text('Guardados: ${_idsGuardadas.length}'),
-            Text('Favoritos: ${_idsFavoritos.length}'),
-            const SizedBox(height: 24),
-            if (_idsBorrar.isNotEmpty)
-              ElevatedButton.icon(
+  Widget _vistaLista(Vista v) {
+    final lista = _listaDe(v);
+
+    if (lista.isEmpty) {
+      return const Center(
+        child: Text(
+          'Esta lista está vacía.',
+          style: TextStyle(color: Colors.white54),
+        ),
+      );
+    }
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: Text(
+            '${lista.length} archivo(s)  ·  Tocá uno para deshacer',
+            style: const TextStyle(color: Colors.white70),
+          ),
+        ),
+        Expanded(
+          child: GridView.builder(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            gridDelegate:
+                const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 3,
+              mainAxisSpacing: 6,
+              crossAxisSpacing: 6,
+            ),
+            itemCount: lista.length,
+            itemBuilder: (context, i) {
+              final asset = lista[i];
+              return GestureDetector(
+                onTap: () => _quitarDeLista(asset, v),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      Container(color: const Color(0xFF1B1F2A)),
+                      FutureBuilder<Uint8List?>(
+                        future: _mini(asset, 300),
+                        builder: (context, snap) {
+                          if (snap.data == null) {
+                            return const SizedBox();
+                          }
+                          return Image.memory(snap.data!, fit: BoxFit.cover);
+                        },
+                      ),
+                      if (asset.type == AssetType.video)
+                        const Positioned(
+                          bottom: 4,
+                          right: 4,
+                          child: Icon(Icons.play_circle_fill,
+                              color: Colors.white, size: 20),
+                        ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        if (v == Vista.paraBorrar)
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
                 onPressed: _borrarMarcadas,
                 icon: const Icon(Icons.delete_forever),
-                label: Text('Borrar ${_idsBorrar.length} archivo(s)'),
+                label: Text('Borrar ${lista.length} archivo(s)'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.redAccent,
                   foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
                 ),
               ),
-          ],
-        ),
-      ),
+            ),
+          ),
+      ],
     );
   }
 
