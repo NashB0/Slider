@@ -1,7 +1,9 @@
+import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_card_swiper/flutter_card_swiper.dart';
 import 'package:photo_manager/photo_manager.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   runApp(const SliderApp());
@@ -33,23 +35,29 @@ class PantallaFotos extends StatefulWidget {
 }
 
 class _PantallaFotosState extends State<PantallaFotos> {
-  final CardSwiperController _controlador = CardSwiperController();
-  final Map<int, Uint8List> _cache = {};
+  static const _kBorrar = 'slider_para_borrar';
+  static const _kGuardadas = 'slider_guardadas';
+  static const _kFavoritos = 'slider_favoritos';
+
+  CardSwiperController _controlador = CardSwiperController();
+  final Map<String, Uint8List> _cache = {};
 
   bool _cargando = true;
   bool _sinPermiso = false;
-  bool _termino = false;
-  List<AssetEntity> _fotos = [];
+  bool _borrando = false;
 
-  final List<AssetEntity> _paraBorrar = [];
-  final List<AssetEntity> _favoritos = [];
-  int _guardadas = 0;
-  int _revisados = 0;
+  List<AssetEntity> _pendientes = [];
+
+  Set<String> _idsBorrar = {};
+  Set<String> _idsGuardadas = {};
+  Set<String> _idsFavoritos = {};
+
+  int _revisadosSesion = 0;
 
   @override
   void initState() {
     super.initState();
-    _cargarFotos();
+    _iniciar();
   }
 
   @override
@@ -58,7 +66,24 @@ class _PantallaFotosState extends State<PantallaFotos> {
     super.dispose();
   }
 
+  Future<void> _iniciar() async {
+    final prefs = await SharedPreferences.getInstance();
+    _idsBorrar = (prefs.getStringList(_kBorrar) ?? []).toSet();
+    _idsGuardadas = (prefs.getStringList(_kGuardadas) ?? []).toSet();
+    _idsFavoritos = (prefs.getStringList(_kFavoritos) ?? []).toSet();
+    await _cargarFotos();
+  }
+
+  Future<void> _guardarEstado() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_kBorrar, _idsBorrar.toList());
+    await prefs.setStringList(_kGuardadas, _idsGuardadas.toList());
+    await prefs.setStringList(_kFavoritos, _idsFavoritos.toList());
+  }
+
   Future<void> _cargarFotos() async {
+    setState(() => _cargando = true);
+
     final permiso = await PhotoManager.requestPermissionExtend();
     if (!permiso.isAuth) {
       setState(() {
@@ -76,44 +101,102 @@ class _PantallaFotosState extends State<PantallaFotos> {
     if (albums.isEmpty) {
       setState(() {
         _cargando = false;
-        _fotos = [];
+        _pendientes = [];
       });
       return;
     }
 
     final total = await albums[0].assetCountAsync;
-    final lista = await albums[0].getAssetListRange(start: 0, end: total);
+    final todas = await albums[0].getAssetListRange(start: 0, end: total);
+
+    final decididos = <String>{}
+      ..addAll(_idsGuardadas)
+      ..addAll(_idsFavoritos)
+      ..addAll(_idsBorrar);
+
+    final pendientes =
+        todas.where((a) => !decididos.contains(a.id)).toList();
 
     if (!mounted) return;
     setState(() {
       _cargando = false;
-      _fotos = lista;
+      _pendientes = pendientes;
+      _controlador = CardSwiperController();
     });
   }
 
-  Future<Uint8List?> _mini(int index) async {
-    if (_cache.containsKey(index)) return _cache[index];
-    final datos = await _fotos[index].thumbnailDataWithSize(
-      const ThumbnailSize(800, 800),
-    );
-    if (datos != null) _cache[index] = datos;
+  Future<Uint8List?> _mini(AssetEntity asset) async {
+    if (_cache.containsKey(asset.id)) return _cache[asset.id];
+    final datos =
+        await asset.thumbnailDataWithSize(const ThumbnailSize(800, 800));
+    if (datos != null) _cache[asset.id] = datos;
     return datos;
   }
 
   bool _alDeslizar(int anterior, int? actual, CardSwiperDirection dir) {
-    final asset = _fotos[anterior];
+    final asset = _pendientes[anterior];
     setState(() {
-      _revisados++;
+      _revisadosSesion++;
       if (dir == CardSwiperDirection.left) {
-        _paraBorrar.add(asset);
+        _idsBorrar.add(asset.id);
       } else if (dir == CardSwiperDirection.right) {
-        _guardadas++;
+        _idsGuardadas.add(asset.id);
       } else if (dir == CardSwiperDirection.top) {
-        _favoritos.add(asset);
+        _idsFavoritos.add(asset.id);
       }
     });
-    _cache.remove(anterior);
+    _guardarEstado();
     return true;
+  }
+
+  Future<void> _borrarMarcadas() async {
+    if (_idsBorrar.isEmpty) return;
+
+    final confirmar = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Borrar archivos'),
+        content: Text(
+          'Vas a borrar ${_idsBorrar.length} archivo(s) de tu teléfono.\n\n'
+          'Android te va a pedir una confirmación final.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Continuar'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmar != true) return;
+
+    setState(() => _borrando = true);
+
+    final borrados =
+        await PhotoManager.editor.deleteWithIds(_idsBorrar.toList());
+
+    _idsBorrar.removeAll(borrados);
+    await _guardarEstado();
+
+    if (!mounted) return;
+    setState(() => _borrando = false);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          borrados.isEmpty
+              ? 'No se borró ningún archivo.'
+              : 'Se borraron ${borrados.length} archivo(s).',
+        ),
+      ),
+    );
+
+    await _cargarFotos();
   }
 
   @override
@@ -122,13 +205,29 @@ class _PantallaFotosState extends State<PantallaFotos> {
       appBar: AppBar(
         title: const Text('Slider'),
         backgroundColor: Colors.transparent,
+        actions: [
+          if (_idsBorrar.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: TextButton.icon(
+                onPressed: _borrando ? null : _borrarMarcadas,
+                icon: const Icon(Icons.delete_forever,
+                    color: Colors.redAccent),
+                label: Text(
+                  '${_idsBorrar.length}',
+                  style: const TextStyle(
+                      color: Colors.redAccent, fontSize: 16),
+                ),
+              ),
+            ),
+        ],
       ),
       body: SafeArea(child: _cuerpo()),
     );
   }
 
   Widget _cuerpo() {
-    if (_cargando) {
+    if (_cargando || _borrando) {
       return const Center(child: CircularProgressIndicator());
     }
     if (_sinPermiso) {
@@ -152,11 +251,8 @@ class _PantallaFotosState extends State<PantallaFotos> {
         ),
       );
     }
-    if (_fotos.isEmpty) {
-      return const Center(child: Text('No se encontraron fotos ni videos.'));
-    }
-    if (_termino) {
-      return _resumen();
+    if (_pendientes.isEmpty) {
+      return _sinPendientes();
     }
 
     return Column(
@@ -164,15 +260,17 @@ class _PantallaFotosState extends State<PantallaFotos> {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           child: Text(
-            '$_revisados de ${_fotos.length} revisados',
+            '${_pendientes.length} pendientes  ·  '
+            '$_revisadosSesion revisados hoy',
             style: const TextStyle(color: Colors.white70),
           ),
         ),
         Expanded(
           child: CardSwiper(
             controller: _controlador,
-            cardsCount: _fotos.length,
-            numberOfCardsDisplayed: _fotos.length >= 3 ? 3 : _fotos.length,
+            cardsCount: _pendientes.length,
+            numberOfCardsDisplayed:
+                _pendientes.length >= 3 ? 3 : _pendientes.length,
             isLoop: false,
             backCardOffset: const Offset(0, 32),
             padding: const EdgeInsets.all(20),
@@ -182,10 +280,7 @@ class _PantallaFotosState extends State<PantallaFotos> {
               up: true,
             ),
             onSwipe: _alDeslizar,
-            onEnd: () => setState(() => _termino = true),
-            cardBuilder: (context, index, dx, dy) {
-              return _tarjeta(index, dx, dy);
-            },
+            cardBuilder: (context, index, dx, dy) => _tarjeta(index, dx, dy),
           ),
         ),
         _panelInferior(),
@@ -193,7 +288,41 @@ class _PantallaFotosState extends State<PantallaFotos> {
     );
   }
 
+  Widget _sinPendientes() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.check_circle_outline,
+                color: Colors.greenAccent, size: 64),
+            const SizedBox(height: 16),
+            const Text('No hay archivos pendientes',
+                style: TextStyle(fontSize: 20), textAlign: TextAlign.center),
+            const SizedBox(height: 20),
+            Text('Marcados para borrar: ${_idsBorrar.length}'),
+            Text('Guardados: ${_idsGuardadas.length}'),
+            Text('Favoritos: ${_idsFavoritos.length}'),
+            const SizedBox(height: 24),
+            if (_idsBorrar.isNotEmpty)
+              ElevatedButton.icon(
+                onPressed: _borrarMarcadas,
+                icon: const Icon(Icons.delete_forever),
+                label: Text('Borrar ${_idsBorrar.length} archivo(s)'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.redAccent,
+                  foregroundColor: Colors.white,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _tarjeta(int index, int dx, int dy) {
+    final asset = _pendientes[index];
     return ClipRRect(
       borderRadius: BorderRadius.circular(24),
       child: Stack(
@@ -201,7 +330,7 @@ class _PantallaFotosState extends State<PantallaFotos> {
         children: [
           Container(color: const Color(0xFF1B1F2A)),
           FutureBuilder<Uint8List?>(
-            future: _mini(index),
+            future: _mini(asset),
             builder: (context, snap) {
               if (snap.data == null) {
                 return const Center(child: CircularProgressIndicator());
@@ -209,16 +338,19 @@ class _PantallaFotosState extends State<PantallaFotos> {
               return Image.memory(snap.data!, fit: BoxFit.cover);
             },
           ),
-          if (_fotos[index].type == AssetType.video)
+          if (asset.type == AssetType.video)
             const Positioned(
               top: 16,
               right: 16,
-              child: Icon(Icons.play_circle_fill,
-                  color: Colors.white, size: 40),
+              child:
+                  Icon(Icons.play_circle_fill, color: Colors.white, size: 40),
             ),
-          if (dx < -10) _etiqueta('BORRAR', Colors.redAccent, Alignment.topRight),
-          if (dx > 10) _etiqueta('GUARDAR', Colors.greenAccent, Alignment.topLeft),
-          if (dy < -10) _etiqueta('FAVORITO', Colors.amber, Alignment.bottomCenter),
+          if (dx < -10)
+            _etiqueta('BORRAR', Colors.redAccent, Alignment.topRight),
+          if (dx > 10)
+            _etiqueta('GUARDAR', Colors.greenAccent, Alignment.topLeft),
+          if (dy < -10)
+            _etiqueta('FAVORITO', Colors.amber, Alignment.bottomCenter),
         ],
       ),
     );
@@ -266,9 +398,9 @@ class _PantallaFotosState extends State<PantallaFotos> {
           ),
           const SizedBox(height: 16),
           Text(
-            'Para borrar: ${_paraBorrar.length}   ·   '
-            'Guardadas: $_guardadas   ·   '
-            'Favoritos: ${_favoritos.length}',
+            'Para borrar: ${_idsBorrar.length}   ·   '
+            'Guardadas: ${_idsGuardadas.length}   ·   '
+            'Favoritos: ${_idsFavoritos.length}',
             style: const TextStyle(fontSize: 13, color: Colors.white54),
           ),
         ],
@@ -288,28 +420,6 @@ class _PantallaFotosState extends State<PantallaFotos> {
           border: Border.all(color: color, width: 2),
         ),
         child: Icon(icono, color: color, size: 30),
-      ),
-    );
-  }
-
-  Widget _resumen() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.check_circle_outline,
-                color: Colors.greenAccent, size: 64),
-            const SizedBox(height: 16),
-            const Text('¡Revisaste todos los archivos!',
-                style: TextStyle(fontSize: 20), textAlign: TextAlign.center),
-            const SizedBox(height: 20),
-            Text('Marcadas para borrar: ${_paraBorrar.length}'),
-            Text('Guardadas: $_guardadas'),
-            Text('Favoritos: ${_favoritos.length}'),
-          ],
-        ),
       ),
     );
   }
