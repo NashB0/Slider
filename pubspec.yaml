@@ -10,6 +10,7 @@ dependencies:
   flutter:
     sdk: flutter
   photo_manager: ^3.6.0
+  flutter_card_swiper: ^7.0.0
 
 flutter:
   uses-material-design: true
