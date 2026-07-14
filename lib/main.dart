@@ -28,7 +28,9 @@ class SliderApp extends StatelessWidget {
   }
 }
 
-enum Vista { revisar, paraBorrar, guardadas, favoritos }
+enum Medio { imagen, video }
+
+enum Seccion { revisar, paraBorrar, guardadas, favoritos }
 
 class PantallaPrincipal extends StatefulWidget {
   const PantallaPrincipal({super.key});
@@ -38,32 +40,41 @@ class PantallaPrincipal extends StatefulWidget {
 }
 
 class _PantallaPrincipalState extends State<PantallaPrincipal> {
-  static const _kBorrar = 'slider_para_borrar';
-  static const _kGuardadas = 'slider_guardadas';
-  static const _kFavoritos = 'slider_favoritos';
-
   static const int _ventana = 6;
 
   CardSwiperController _controlador = CardSwiperController();
 
-  final Map<String, Uint8List> _imagenes = {};
+  final Map<String, Uint8List> _imagenesCache = {};
   final Set<String> _pidiendo = {};
 
   bool _cargando = true;
   bool _sinPermiso = false;
   bool _ocupado = false;
 
-  Vista _vista = Vista.revisar;
+  Medio _medio = Medio.imagen;
+  Seccion _seccion = Seccion.revisar;
 
   List<AssetEntity> _todas = [];
   List<AssetEntity> _pendientes = [];
 
-  Set<String> _idsBorrar = {};
-  Set<String> _idsGuardadas = {};
-  Set<String> _idsFavoritos = {};
+  // Listas separadas por tipo
+  final Map<Medio, Set<String>> _borrar = {
+    Medio.imagen: {},
+    Medio.video: {},
+  };
+  final Map<Medio, Set<String>> _guardadas = {
+    Medio.imagen: {},
+    Medio.video: {},
+  };
+  final Map<Medio, Set<String>> _favoritos = {
+    Medio.imagen: {},
+    Medio.video: {},
+  };
 
-  int _revisadosSesion = 0;
   int _indiceActual = 0;
+
+  String _clave(String base, Medio m) =>
+      'slider_${base}_${m == Medio.imagen ? 'img' : 'vid'}';
 
   @override
   void initState() {
@@ -79,20 +90,49 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
 
   Future<void> _iniciar() async {
     final prefs = await SharedPreferences.getInstance();
-    _idsBorrar = (prefs.getStringList(_kBorrar) ?? []).toSet();
-    _idsGuardadas = (prefs.getStringList(_kGuardadas) ?? []).toSet();
-    _idsFavoritos = (prefs.getStringList(_kFavoritos) ?? []).toSet();
-    await _cargarFotos();
+
+    for (final m in Medio.values) {
+      _borrar[m] =
+          (prefs.getStringList(_clave('borrar', m)) ?? []).toSet();
+      _guardadas[m] =
+          (prefs.getStringList(_clave('guardadas', m)) ?? []).toSet();
+      _favoritos[m] =
+          (prefs.getStringList(_clave('favoritos', m)) ?? []).toSet();
+    }
+
+    // Migración: lo guardado antes (sin separar) pasa a Imágenes
+    final viejasGuardadas = prefs.getStringList('slider_guardadas');
+    if (viejasGuardadas != null && viejasGuardadas.isNotEmpty) {
+      _guardadas[Medio.imagen]!.addAll(viejasGuardadas);
+      await prefs.remove('slider_guardadas');
+    }
+    final viejasBorrar = prefs.getStringList('slider_para_borrar');
+    if (viejasBorrar != null && viejasBorrar.isNotEmpty) {
+      _borrar[Medio.imagen]!.addAll(viejasBorrar);
+      await prefs.remove('slider_para_borrar');
+    }
+    final viejasFav = prefs.getStringList('slider_favoritos');
+    if (viejasFav != null && viejasFav.isNotEmpty) {
+      _favoritos[Medio.imagen]!.addAll(viejasFav);
+      await prefs.remove('slider_favoritos');
+    }
+
+    await _guardarEstado();
+    await _cargarTodo();
   }
 
   Future<void> _guardarEstado() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(_kBorrar, _idsBorrar.toList());
-    await prefs.setStringList(_kGuardadas, _idsGuardadas.toList());
-    await prefs.setStringList(_kFavoritos, _idsFavoritos.toList());
+    for (final m in Medio.values) {
+      await prefs.setStringList(_clave('borrar', m), _borrar[m]!.toList());
+      await prefs.setStringList(
+          _clave('guardadas', m), _guardadas[m]!.toList());
+      await prefs.setStringList(
+          _clave('favoritos', m), _favoritos[m]!.toList());
+    }
   }
 
-  Future<void> _cargarFotos() async {
+  Future<void> _cargarTodo() async {
     setState(() => _cargando = true);
 
     final permiso = await PhotoManager.requestPermissionExtend();
@@ -125,27 +165,28 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
     setState(() {
       _cargando = false;
       _todas = todas;
-      _pendientes = _calcularPendientes(todas);
-      _controlador = CardSwiperController();
-      _indiceActual = 0;
     });
-
-    _precargar();
+    _recalcular();
   }
 
-  List<AssetEntity> _calcularPendientes(List<AssetEntity> todas) {
-    final decididos = <String>{}
-      ..addAll(_idsGuardadas)
-      ..addAll(_idsFavoritos)
-      ..addAll(_idsBorrar);
-    return todas.where((a) => !decididos.contains(a.id)).toList();
+  bool _esDelMedio(AssetEntity a, Medio m) {
+    if (m == Medio.video) return a.type == AssetType.video;
+    return a.type == AssetType.image;
   }
 
   void _recalcular() {
+    final decididos = <String>{}
+      ..addAll(_borrar[_medio]!)
+      ..addAll(_guardadas[_medio]!)
+      ..addAll(_favoritos[_medio]!);
+
     setState(() {
-      _pendientes = _calcularPendientes(_todas);
+      _pendientes = _todas
+          .where((a) => _esDelMedio(a, _medio) && !decididos.contains(a.id))
+          .toList();
       _controlador = CardSwiperController();
       _indiceActual = 0;
+      _imagenesCache.clear();
     });
     _precargar();
   }
@@ -154,7 +195,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
     final hasta = (_indiceActual + _ventana).clamp(0, _pendientes.length);
     for (var i = _indiceActual; i < hasta; i++) {
       final asset = _pendientes[i];
-      if (_imagenes.containsKey(asset.id)) continue;
+      if (_imagenesCache.containsKey(asset.id)) continue;
       if (_pidiendo.contains(asset.id)) continue;
       _pidiendo.add(asset.id);
       asset
@@ -162,7 +203,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
           .then((datos) {
         _pidiendo.remove(asset.id);
         if (datos == null || !mounted) return;
-        _imagenes[asset.id] = datos;
+        _imagenesCache[asset.id] = datos;
         setState(() {});
       });
     }
@@ -171,32 +212,32 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
     for (var i = _indiceActual; i < hasta; i++) {
       vigentes.add(_pendientes[i].id);
     }
-    _imagenes.removeWhere((id, _) => !vigentes.contains(id));
+    _imagenesCache.removeWhere((id, _) => !vigentes.contains(id));
   }
 
-  List<AssetEntity> _listaDe(Vista v) {
-    late Set<String> ids;
-    if (v == Vista.paraBorrar) {
-      ids = _idsBorrar;
-    } else if (v == Vista.guardadas) {
-      ids = _idsGuardadas;
-    } else {
-      ids = _idsFavoritos;
-    }
-    return _todas.where((a) => ids.contains(a.id)).toList();
+  Set<String> _idsDe(Seccion s, Medio m) {
+    if (s == Seccion.paraBorrar) return _borrar[m]!;
+    if (s == Seccion.guardadas) return _guardadas[m]!;
+    return _favoritos[m]!;
+  }
+
+  List<AssetEntity> _listaDe(Seccion s, Medio m) {
+    final ids = _idsDe(s, m);
+    return _todas
+        .where((a) => _esDelMedio(a, m) && ids.contains(a.id))
+        .toList();
   }
 
   bool _alDeslizar(int anterior, int? actual, CardSwiperDirection dir) {
     final asset = _pendientes[anterior];
     setState(() {
-      _revisadosSesion++;
       _indiceActual = actual ?? anterior + 1;
       if (dir == CardSwiperDirection.left) {
-        _idsBorrar.add(asset.id);
+        _borrar[_medio]!.add(asset.id);
       } else if (dir == CardSwiperDirection.right) {
-        _idsGuardadas.add(asset.id);
+        _guardadas[_medio]!.add(asset.id);
       } else if (dir == CardSwiperDirection.top) {
-        _idsFavoritos.add(asset.id);
+        _favoritos[_medio]!.add(asset.id);
       }
     });
     _guardarEstado();
@@ -204,20 +245,14 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
     return true;
   }
 
-  Future<void> _quitarDeLista(AssetEntity asset, Vista v) async {
-    final nombre = v == Vista.paraBorrar
-        ? 'Para borrar'
-        : v == Vista.guardadas
-            ? 'Guardadas'
-            : 'Favoritos';
-
+  Future<void> _quitarDeLista(AssetEntity asset, Seccion s, Medio m) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Deshacer'),
-        content: Text(
-          'Sacar este archivo de "$nombre".\n\n'
-          'Va a volver a la pila de pendientes para que lo revises de nuevo.',
+        content: const Text(
+          'Este archivo va a volver a la pila de pendientes '
+          'para que lo revises de nuevo.',
         ),
         actions: [
           TextButton(
@@ -235,23 +270,26 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
     if (ok != true) return;
 
     setState(() {
-      _idsBorrar.remove(asset.id);
-      _idsGuardadas.remove(asset.id);
-      _idsFavoritos.remove(asset.id);
+      _borrar[m]!.remove(asset.id);
+      _guardadas[m]!.remove(asset.id);
+      _favoritos[m]!.remove(asset.id);
     });
     await _guardarEstado();
     _recalcular();
   }
 
-  Future<void> _borrarMarcadas() async {
-    if (_idsBorrar.isEmpty) return;
+  Future<void> _borrarMarcadas(Medio m) async {
+    final ids = _borrar[m]!;
+    if (ids.isEmpty) return;
+
+    final tipo = m == Medio.video ? 'video(s)' : 'imagen(es)';
 
     final confirmar = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Borrar archivos'),
         content: Text(
-          'Vas a borrar ${_idsBorrar.length} archivo(s) de tu teléfono.\n\n'
+          'Vas a borrar ${ids.length} $tipo de tu teléfono.\n\n'
           'Android te va a pedir una confirmación final.',
         ),
         actions: [
@@ -271,10 +309,9 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
 
     setState(() => _ocupado = true);
 
-    final borrados =
-        await PhotoManager.editor.deleteWithIds(_idsBorrar.toList());
+    final borrados = await PhotoManager.editor.deleteWithIds(ids.toList());
 
-    _idsBorrar.removeAll(borrados);
+    _borrar[m]!.removeAll(borrados);
     await _guardarEstado();
 
     if (!mounted) return;
@@ -290,20 +327,31 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
       ),
     );
 
-    await _cargarFotos();
+    await _cargarTodo();
   }
 
   String get _titulo {
-    switch (_vista) {
-      case Vista.revisar:
-        return 'Slider';
-      case Vista.paraBorrar:
-        return 'Para borrar';
-      case Vista.guardadas:
-        return 'Guardadas';
-      case Vista.favoritos:
-        return 'Favoritos';
+    final tipo = _medio == Medio.video ? 'Videos' : 'Imágenes';
+    switch (_seccion) {
+      case Seccion.revisar:
+        return '$tipo · Revisar';
+      case Seccion.paraBorrar:
+        return '$tipo · Para borrar';
+      case Seccion.guardadas:
+        return '$tipo · Guardadas';
+      case Seccion.favoritos:
+        return '$tipo · Favoritos';
     }
+  }
+
+  int _pendientesDe(Medio m) {
+    final decididos = <String>{}
+      ..addAll(_borrar[m]!)
+      ..addAll(_guardadas[m]!)
+      ..addAll(_favoritos[m]!);
+    return _todas
+        .where((a) => _esDelMedio(a, m) && !decididos.contains(a.id))
+        .length;
   }
 
   @override
@@ -334,22 +382,51 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
               ),
             ),
           ),
-          _itemMenu(Icons.style, 'Revisar', _pendientes.length, Vista.revisar),
-          _itemMenu(Icons.delete_outline, 'Para borrar', _idsBorrar.length,
-              Vista.paraBorrar),
-          _itemMenu(Icons.check_circle_outline, 'Guardadas',
-              _idsGuardadas.length, Vista.guardadas),
-          _itemMenu(Icons.star_outline, 'Favoritos', _idsFavoritos.length,
-              Vista.favoritos),
+          _encabezado('IMÁGENES'),
+          ..._itemsDe(Medio.imagen),
+          const Divider(color: Colors.white24),
+          _encabezado('VIDEOS'),
+          ..._itemsDe(Medio.video),
+          const SizedBox(height: 20),
         ],
       ),
     );
   }
 
-  Widget _itemMenu(IconData icono, String texto, int cantidad, Vista v) {
-    final activo = _vista == v;
+  Widget _encabezado(String texto) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+      child: Text(
+        texto,
+        style: const TextStyle(
+          color: Colors.white38,
+          fontSize: 12,
+          fontWeight: FontWeight.bold,
+          letterSpacing: 1.5,
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _itemsDe(Medio m) {
+    return [
+      _item(Icons.style, 'Revisar', _pendientesDe(m), m, Seccion.revisar),
+      _item(Icons.delete_outline, 'Para borrar', _borrar[m]!.length, m,
+          Seccion.paraBorrar),
+      _item(Icons.check_circle_outline, 'Guardadas', _guardadas[m]!.length,
+          m, Seccion.guardadas),
+      _item(Icons.star_outline, 'Favoritos', _favoritos[m]!.length, m,
+          Seccion.favoritos),
+    ];
+  }
+
+  Widget _item(
+      IconData icono, String texto, int cantidad, Medio m, Seccion s) {
+    final activo = _medio == m && _seccion == s;
     return ListTile(
-      leading: Icon(icono, color: activo ? Colors.amber : Colors.white70),
+      dense: true,
+      leading: Icon(icono,
+          size: 22, color: activo ? Colors.amber : Colors.white70),
       title: Text(
         texto,
         style: TextStyle(color: activo ? Colors.amber : Colors.white),
@@ -357,8 +434,13 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
       trailing:
           Text('$cantidad', style: const TextStyle(color: Colors.white54)),
       onTap: () {
-        setState(() => _vista = v);
+        final cambioMedio = _medio != m;
+        setState(() {
+          _medio = m;
+          _seccion = s;
+        });
         Navigator.pop(context);
+        if (cambioMedio) _recalcular();
       },
     );
   }
@@ -375,7 +457,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
             mainAxisSize: MainAxisSize.min,
             children: [
               const Text(
-                'Slider necesita permiso para ver tus fotos.',
+                'Slider necesita permiso para ver tus fotos y videos.',
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 16),
@@ -389,8 +471,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
       );
     }
 
-    if (_vista == Vista.revisar) return _vistaRevisar();
-    return _vistaLista(_vista);
+    if (_seccion == Seccion.revisar) return _vistaRevisar();
+    return _vistaLista(_seccion, _medio);
   }
 
   Widget _vistaRevisar() {
@@ -404,8 +486,13 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
               const Icon(Icons.check_circle_outline,
                   color: Colors.greenAccent, size: 64),
               const SizedBox(height: 16),
-              const Text('No hay archivos pendientes',
-                  style: TextStyle(fontSize: 20)),
+              Text(
+                _medio == Medio.video
+                    ? 'No hay videos pendientes'
+                    : 'No hay imágenes pendientes',
+                style: const TextStyle(fontSize: 20),
+                textAlign: TextAlign.center,
+              ),
               const SizedBox(height: 12),
               const Text(
                 'Abrí el menú ☰ para ver tus listas.',
@@ -418,16 +505,12 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
       );
     }
 
-    final totalVideos =
-        _todas.where((a) => a.type == AssetType.video).length;
-
     return Column(
       children: [
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           child: Text(
-            '${_pendientes.length} pendientes  ·  '
-            '$totalVideos videos en total',
+            '${_pendientes.length} pendientes',
             style: const TextStyle(color: Colors.white70),
           ),
         ),
@@ -454,8 +537,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
     );
   }
 
-  Widget _vistaLista(Vista v) {
-    final lista = _listaDe(v);
+  Widget _vistaLista(Seccion s, Medio m) {
+    final lista = _listaDe(s, m);
 
     if (lista.isEmpty) {
       return const Center(
@@ -485,7 +568,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
             itemBuilder: (context, i) {
               final asset = lista[i];
               return GestureDetector(
-                onTap: () => _quitarDeLista(asset, v),
+                onTap: () => _quitarDeLista(asset, s, m),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(10),
                   child: Stack(
@@ -514,13 +597,13 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
             },
           ),
         ),
-        if (v == Vista.paraBorrar)
+        if (s == Seccion.paraBorrar)
           Padding(
             padding: const EdgeInsets.all(16),
             child: SizedBox(
               width: double.infinity,
               child: ElevatedButton.icon(
-                onPressed: _borrarMarcadas,
+                onPressed: () => _borrarMarcadas(m),
                 icon: const Icon(Icons.delete_forever),
                 label: Text('Borrar ${lista.length} archivo(s)'),
                 style: ElevatedButton.styleFrom(
@@ -539,7 +622,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
     final asset = _pendientes[index];
     final esVideo = asset.type == AssetType.video;
     final esActual = index == _indiceActual;
-    final datos = _imagenes[asset.id];
+    final datos = _imagenesCache[asset.id];
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(24),
@@ -637,9 +720,9 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
           ),
           const SizedBox(height: 16),
           Text(
-            'Para borrar: ${_idsBorrar.length}   ·   '
-            'Guardadas: ${_idsGuardadas.length}   ·   '
-            'Favoritos: ${_idsFavoritos.length}',
+            'Para borrar: ${_borrar[_medio]!.length}   ·   '
+            'Guardadas: ${_guardadas[_medio]!.length}   ·   '
+            'Favoritos: ${_favoritos[_medio]!.length}',
             style: const TextStyle(fontSize: 13, color: Colors.white54),
           ),
         ],
