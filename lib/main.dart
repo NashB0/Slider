@@ -1,8 +1,10 @@
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_card_swiper/flutter_card_swiper.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:video_player/video_player.dart';
 
 void main() {
   runApp(const SliderApp());
@@ -57,6 +59,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
   Set<String> _idsFavoritos = {};
 
   int _revisadosSesion = 0;
+  int _indiceActual = 0;
 
   @override
   void initState() {
@@ -120,6 +123,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
       _todas = todas;
       _pendientes = _calcularPendientes(todas);
       _controlador = CardSwiperController();
+      _indiceActual = 0;
     });
   }
 
@@ -135,6 +139,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
     setState(() {
       _pendientes = _calcularPendientes(_todas);
       _controlador = CardSwiperController();
+      _indiceActual = 0;
     });
   }
 
@@ -162,6 +167,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
     final asset = _pendientes[anterior];
     setState(() {
       _revisadosSesion++;
+      _indiceActual = actual ?? anterior + 1;
       if (dir == CardSwiperDirection.left) {
         _idsBorrar.add(asset.id);
       } else if (dir == CardSwiperDirection.right) {
@@ -447,8 +453,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
         Expanded(
           child: GridView.builder(
             padding: const EdgeInsets.symmetric(horizontal: 12),
-            gridDelegate:
-                const SliverGridDelegateWithFixedCrossAxisCount(
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: 3,
               mainAxisSpacing: 6,
               crossAxisSpacing: 6,
@@ -467,9 +472,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
                       FutureBuilder<Uint8List?>(
                         future: _mini(asset, 300),
                         builder: (context, snap) {
-                          if (snap.data == null) {
-                            return const SizedBox();
-                          }
+                          if (snap.data == null) return const SizedBox();
                           return Image.memory(snap.data!, fit: BoxFit.cover);
                         },
                       ),
@@ -510,27 +513,56 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
 
   Widget _tarjeta(int index, int dx, int dy) {
     final asset = _pendientes[index];
+    final esVideo = asset.type == AssetType.video;
+    final esActual = index == _indiceActual;
+
     return ClipRRect(
       borderRadius: BorderRadius.circular(24),
       child: Stack(
         fit: StackFit.expand,
         children: [
           Container(color: const Color(0xFF1B1F2A)),
-          FutureBuilder<Uint8List?>(
-            future: _mini(asset),
-            builder: (context, snap) {
-              if (snap.data == null) {
-                return const Center(child: CircularProgressIndicator());
-              }
-              return Image.memory(snap.data!, fit: BoxFit.cover);
-            },
-          ),
-          if (asset.type == AssetType.video)
-            const Positioned(
+          if (esVideo && esActual)
+            TarjetaVideo(
+              key: ValueKey(asset.id),
+              asset: asset,
+              miniatura: _mini(asset),
+            )
+          else
+            FutureBuilder<Uint8List?>(
+              future: _mini(asset),
+              builder: (context, snap) {
+                if (snap.data == null) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                return Image.memory(snap.data!, fit: BoxFit.cover);
+              },
+            ),
+          if (esVideo)
+            Positioned(
               top: 16,
               right: 16,
-              child:
-                  Icon(Icons.play_circle_fill, color: Colors.white, size: 40),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.videocam,
+                        color: Colors.white, size: 16),
+                    const SizedBox(width: 6),
+                    Text(
+                      _duracion(asset.duration),
+                      style: const TextStyle(
+                          color: Colors.white, fontSize: 13),
+                    ),
+                  ],
+                ),
+              ),
             ),
           if (dx < -10)
             _etiqueta('BORRAR', Colors.redAccent, Alignment.topRight),
@@ -541,6 +573,12 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
         ],
       ),
     );
+  }
+
+  String _duracion(int segundos) {
+    final m = segundos ~/ 60;
+    final s = segundos % 60;
+    return '$m:${s.toString().padLeft(2, '0')}';
   }
 
   Widget _etiqueta(String texto, Color color, Alignment alineacion) {
@@ -608,6 +646,90 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
         ),
         child: Icon(icono, color: color, size: 30),
       ),
+    );
+  }
+}
+
+class TarjetaVideo extends StatefulWidget {
+  final AssetEntity asset;
+  final Future<Uint8List?> miniatura;
+
+  const TarjetaVideo({
+    super.key,
+    required this.asset,
+    required this.miniatura,
+  });
+
+  @override
+  State<TarjetaVideo> createState() => _TarjetaVideoState();
+}
+
+class _TarjetaVideoState extends State<TarjetaVideo> {
+  VideoPlayerController? _ctrl;
+  bool _listo = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _preparar();
+  }
+
+  Future<void> _preparar() async {
+    final File? archivo = await widget.asset.file;
+    if (archivo == null || !mounted) return;
+
+    final ctrl = VideoPlayerController.file(archivo);
+    try {
+      await ctrl.initialize();
+      await ctrl.setVolume(0);
+      await ctrl.setLooping(true);
+      await ctrl.play();
+    } catch (_) {
+      return;
+    }
+
+    if (!mounted) {
+      ctrl.dispose();
+      return;
+    }
+
+    setState(() {
+      _ctrl = ctrl;
+      _listo = true;
+    });
+  }
+
+  @override
+  void dispose() {
+    _ctrl?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_listo && _ctrl != null) {
+      return FittedBox(
+        fit: BoxFit.cover,
+        child: SizedBox(
+          width: _ctrl!.value.size.width,
+          height: _ctrl!.value.size.height,
+          child: VideoPlayer(_ctrl!),
+        ),
+      );
+    }
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        FutureBuilder<Uint8List?>(
+          future: widget.miniatura,
+          builder: (context, snap) {
+            if (snap.data == null) return const SizedBox();
+            return Image.memory(snap.data!, fit: BoxFit.cover);
+          },
+        ),
+        const Center(child: CircularProgressIndicator()),
+      ],
     );
   }
 }
