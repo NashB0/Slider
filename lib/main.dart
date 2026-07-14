@@ -42,8 +42,12 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
   static const _kGuardadas = 'slider_guardadas';
   static const _kFavoritos = 'slider_favoritos';
 
+  static const int _ventana = 6;
+
   CardSwiperController _controlador = CardSwiperController();
-  final Map<String, Uint8List> _cache = {};
+
+  final Map<String, Uint8List> _imagenes = {};
+  final Set<String> _pidiendo = {};
 
   bool _cargando = true;
   bool _sinPermiso = false;
@@ -125,6 +129,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
       _controlador = CardSwiperController();
       _indiceActual = 0;
     });
+
+    _precargar();
   }
 
   List<AssetEntity> _calcularPendientes(List<AssetEntity> todas) {
@@ -141,6 +147,33 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
       _controlador = CardSwiperController();
       _indiceActual = 0;
     });
+    _precargar();
+  }
+
+  // Precarga las próximas miniaturas y libera las que quedaron atrás.
+  void _precargar() {
+    final hasta = (_indiceActual + _ventana).clamp(0, _pendientes.length);
+    for (var i = _indiceActual; i < hasta; i++) {
+      final asset = _pendientes[i];
+      if (_imagenes.containsKey(asset.id)) continue;
+      if (_pidiendo.contains(asset.id)) continue;
+      _pidiendo.add(asset.id);
+      asset
+          .thumbnailDataWithSize(const ThumbnailSize(800, 800))
+          .then((datos) {
+        _pidiendo.remove(asset.id);
+        if (datos == null || !mounted) return;
+        _imagenes[asset.id] = datos;
+        setState(() {});
+      });
+    }
+
+    // Liberar memoria de lo ya revisado
+    final vigentes = <String>{};
+    for (var i = _indiceActual; i < hasta; i++) {
+      vigentes.add(_pendientes[i].id);
+    }
+    _imagenes.removeWhere((id, _) => !vigentes.contains(id));
   }
 
   List<AssetEntity> _listaDe(Vista v) {
@@ -153,14 +186,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
       ids = _idsFavoritos;
     }
     return _todas.where((a) => ids.contains(a.id)).toList();
-  }
-
-  Future<Uint8List?> _mini(AssetEntity asset, [int tam = 800]) async {
-    final clave = '${asset.id}_$tam';
-    if (_cache.containsKey(clave)) return _cache[clave];
-    final datos = await asset.thumbnailDataWithSize(ThumbnailSize(tam, tam));
-    if (datos != null) _cache[clave] = datos;
-    return datos;
   }
 
   bool _alDeslizar(int anterior, int? actual, CardSwiperDirection dir) {
@@ -177,6 +202,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
       }
     });
     _guardarEstado();
+    _precargar();
     return true;
   }
 
@@ -330,10 +356,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
         texto,
         style: TextStyle(color: activo ? Colors.amber : Colors.white),
       ),
-      trailing: Text(
-        '$cantidad',
-        style: const TextStyle(color: Colors.white54),
-      ),
+      trailing:
+          Text('$cantidad', style: const TextStyle(color: Colors.white54)),
       onTap: () {
         setState(() => _vista = v);
         Navigator.pop(context);
@@ -434,10 +458,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
 
     if (lista.isEmpty) {
       return const Center(
-        child: Text(
-          'Esta lista está vacía.',
-          style: TextStyle(color: Colors.white54),
-        ),
+        child: Text('Esta lista está vacía.',
+            style: TextStyle(color: Colors.white54)),
       );
     }
 
@@ -470,7 +492,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
                     children: [
                       Container(color: const Color(0xFF1B1F2A)),
                       FutureBuilder<Uint8List?>(
-                        future: _mini(asset, 300),
+                        future: asset.thumbnailDataWithSize(
+                            const ThumbnailSize(300, 300)),
                         builder: (context, snap) {
                           if (snap.data == null) return const SizedBox();
                           return Image.memory(snap.data!, fit: BoxFit.cover);
@@ -515,6 +538,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
     final asset = _pendientes[index];
     final esVideo = asset.type == AssetType.video;
     final esActual = index == _indiceActual;
+    final datos = _imagenes[asset.id];
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(24),
@@ -522,22 +546,12 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
         fit: StackFit.expand,
         children: [
           Container(color: const Color(0xFF1B1F2A)),
-          if (esVideo && esActual)
-            TarjetaVideo(
-              key: ValueKey(asset.id),
-              asset: asset,
-              miniatura: _mini(asset),
-            )
+          if (datos != null)
+            Image.memory(datos, fit: BoxFit.cover, gaplessPlayback: true)
           else
-            FutureBuilder<Uint8List?>(
-              future: _mini(asset),
-              builder: (context, snap) {
-                if (snap.data == null) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                return Image.memory(snap.data!, fit: BoxFit.cover);
-              },
-            ),
+            const Center(child: CircularProgressIndicator()),
+          if (esVideo && esActual)
+            TarjetaVideo(key: ValueKey(asset.id), asset: asset),
           if (esVideo)
             Positioned(
               top: 16,
@@ -552,13 +566,12 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Icon(Icons.videocam,
-                        color: Colors.white, size: 16),
+                    const Icon(Icons.videocam, color: Colors.white, size: 16),
                     const SizedBox(width: 6),
                     Text(
                       _duracion(asset.duration),
-                      style: const TextStyle(
-                          color: Colors.white, fontSize: 13),
+                      style:
+                          const TextStyle(color: Colors.white, fontSize: 13),
                     ),
                   ],
                 ),
@@ -652,13 +665,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
 
 class TarjetaVideo extends StatefulWidget {
   final AssetEntity asset;
-  final Future<Uint8List?> miniatura;
 
-  const TarjetaVideo({
-    super.key,
-    required this.asset,
-    required this.miniatura,
-  });
+  const TarjetaVideo({super.key, required this.asset});
 
   @override
   State<TarjetaVideo> createState() => _TarjetaVideoState();
@@ -707,29 +715,15 @@ class _TarjetaVideoState extends State<TarjetaVideo> {
 
   @override
   Widget build(BuildContext context) {
-    if (_listo && _ctrl != null) {
-      return FittedBox(
-        fit: BoxFit.cover,
-        child: SizedBox(
-          width: _ctrl!.value.size.width,
-          height: _ctrl!.value.size.height,
-          child: VideoPlayer(_ctrl!),
-        ),
-      );
-    }
+    if (!_listo || _ctrl == null) return const SizedBox();
 
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        FutureBuilder<Uint8List?>(
-          future: widget.miniatura,
-          builder: (context, snap) {
-            if (snap.data == null) return const SizedBox();
-            return Image.memory(snap.data!, fit: BoxFit.cover);
-          },
-        ),
-        const Center(child: CircularProgressIndicator()),
-      ],
+    return FittedBox(
+      fit: BoxFit.cover,
+      child: SizedBox(
+        width: _ctrl!.value.size.width,
+        height: _ctrl!.value.size.height,
+        child: VideoPlayer(_ctrl!),
+      ),
     );
   }
 }
