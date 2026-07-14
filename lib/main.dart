@@ -150,7 +150,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
     _precargar();
   }
 
-  // Precarga las próximas miniaturas y libera las que quedaron atrás.
   void _precargar() {
     final hasta = (_indiceActual + _ventana).clamp(0, _pendientes.length);
     for (var i = _indiceActual; i < hasta; i++) {
@@ -168,7 +167,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
       });
     }
 
-    // Liberar memoria de lo ya revisado
     final vigentes = <String>{};
     for (var i = _indiceActual; i < hasta; i++) {
       vigentes.add(_pendientes[i].id);
@@ -420,13 +418,16 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
       );
     }
 
+    final totalVideos =
+        _todas.where((a) => a.type == AssetType.video).length;
+
     return Column(
       children: [
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           child: Text(
             '${_pendientes.length} pendientes  ·  '
-            '$_revisadosSesion revisados hoy',
+            '$totalVideos videos en total',
             style: const TextStyle(color: Colors.white70),
           ),
         ),
