@@ -47,6 +47,10 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
   final Map<String, Uint8List> _imagenesCache = {};
   final Set<String> _pidiendo = {};
 
+  // Reproductores precargados por id de asset
+  final Map<String, VideoPlayerController> _videos = {};
+  final Set<String> _preparandoVideo = {};
+
   bool _cargando = true;
   bool _sinPermiso = false;
   bool _ocupado = false;
@@ -84,7 +88,15 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
   @override
   void dispose() {
     _controlador.dispose();
+    _liberarTodosLosVideos();
     super.dispose();
+  }
+
+  void _liberarTodosLosVideos() {
+    for (final c in _videos.values) {
+      c.dispose();
+    }
+    _videos.clear();
   }
 
   Future<void> _iniciar() async {
@@ -186,7 +198,9 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
       _indiceActual = 0;
       _imagenesCache.clear();
     });
+    _liberarTodosLosVideos();
     _precargar();
+    _gestionarVideos();
   }
 
   void _precargar() {
@@ -211,6 +225,73 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
       vigentes.add(_pendientes[i].id);
     }
     _imagenesCache.removeWhere((id, _) => !vigentes.contains(id));
+  }
+
+  // Mantiene listos: el video actual y el siguiente. Libera el resto.
+  void _gestionarVideos() {
+    if (_medio != Medio.video) {
+      _liberarTodosLosVideos();
+      return;
+    }
+
+    final necesarios = <String>{};
+    for (var i = _indiceActual; i <= _indiceActual + 1; i++) {
+      if (i >= 0 && i < _pendientes.length) {
+        final asset = _pendientes[i];
+        if (asset.type == AssetType.video) {
+          necesarios.add(asset.id);
+          _prepararVideo(asset);
+        }
+      }
+    }
+
+    // Liberar los que ya no se necesitan
+    final aLiberar =
+        _videos.keys.where((id) => !necesarios.contains(id)).toList();
+    for (final id in aLiberar) {
+      _videos[id]?.dispose();
+      _videos.remove(id);
+    }
+  }
+
+  Future<void> _prepararVideo(AssetEntity asset) async {
+    if (_videos.containsKey(asset.id)) return;
+    if (_preparandoVideo.contains(asset.id)) return;
+    _preparandoVideo.add(asset.id);
+
+    try {
+      final File? archivo = await asset.file;
+      if (archivo == null || !mounted) {
+        _preparandoVideo.remove(asset.id);
+        return;
+      }
+
+      final ctrl = VideoPlayerController.file(archivo);
+      await ctrl.initialize();
+      await ctrl.setVolume(0);
+      await ctrl.setLooping(true);
+
+      _preparandoVideo.remove(asset.id);
+
+      if (!mounted) {
+        ctrl.dispose();
+        return;
+      }
+
+      _videos[asset.id] = ctrl;
+
+      // Solo reproduce si es la tarjeta actual
+      final actual = (_indiceActual < _pendientes.length)
+          ? _pendientes[_indiceActual]
+          : null;
+      if (actual != null && actual.id == asset.id) {
+        ctrl.play();
+      }
+
+      setState(() {});
+    } catch (_) {
+      _preparandoVideo.remove(asset.id);
+    }
   }
 
   Set<String> _idsDe(Seccion s, Medio m) {
@@ -240,6 +321,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
     });
     _guardarEstado();
     _precargar();
+    _gestionarVideos();
     return true;
   }
 
@@ -438,7 +520,11 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
           _seccion = s;
         });
         Navigator.pop(context);
-        if (cambioMedio) _recalcular();
+        if (cambioMedio) {
+          _recalcular();
+        } else {
+          _gestionarVideos();
+        }
       },
     );
   }
@@ -621,6 +707,8 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
     final esVideo = asset.type == AssetType.video;
     final esActual = index == _indiceActual;
     final datos = _imagenesCache[asset.id];
+    final ctrlVideo = _videos[asset.id];
+    final videoListo = ctrlVideo != null && ctrlVideo.value.isInitialized;
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(24),
@@ -632,11 +720,14 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
             Image.memory(datos, fit: BoxFit.cover, gaplessPlayback: true)
           else
             const Center(child: CircularProgressIndicator()),
-          if (esVideo && esActual)
-            TarjetaVideo(
-              key: ValueKey(asset.id),
-              asset: asset,
-              miniatura: datos,
+          if (esVideo && esActual && videoListo)
+            FittedBox(
+              fit: BoxFit.cover,
+              child: SizedBox(
+                width: ctrlVideo.value.size.width,
+                height: ctrlVideo.value.size.height,
+                child: VideoPlayer(ctrlVideo),
+              ),
             ),
           if (esVideo)
             Positioned(
@@ -745,96 +836,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
         ),
         child: Icon(icono, color: color, size: 30),
       ),
-    );
-  }
-}
-
-class TarjetaVideo extends StatefulWidget {
-  final AssetEntity asset;
-  final Uint8List? miniatura;
-
-  const TarjetaVideo({
-    super.key,
-    required this.asset,
-    this.miniatura,
-  });
-
-  @override
-  State<TarjetaVideo> createState() => _TarjetaVideoState();
-}
-
-class _TarjetaVideoState extends State<TarjetaVideo> {
-  VideoPlayerController? _ctrl;
-  bool _listo = false;
-  bool _fallo = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _preparar();
-  }
-
-  Future<void> _preparar() async {
-    try {
-      final File? archivo = await widget.asset.file;
-      if (archivo == null || !mounted) {
-        _marcarFallo();
-        return;
-      }
-
-      final ctrl = VideoPlayerController.file(archivo);
-      await ctrl.initialize();
-      await ctrl.setVolume(0);
-      await ctrl.setLooping(true);
-      await ctrl.play();
-
-      if (!mounted) {
-        ctrl.dispose();
-        return;
-      }
-
-      setState(() {
-        _ctrl = ctrl;
-        _listo = true;
-      });
-    } catch (_) {
-      _marcarFallo();
-    }
-  }
-
-  void _marcarFallo() {
-    if (!mounted) return;
-    setState(() => _fallo = true);
-  }
-
-  @override
-  void dispose() {
-    _ctrl?.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_listo && _ctrl != null) {
-      return FittedBox(
-        fit: BoxFit.cover,
-        child: SizedBox(
-          width: _ctrl!.value.size.width,
-          height: _ctrl!.value.size.height,
-          child: VideoPlayer(_ctrl!),
-        ),
-      );
-    }
-
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        if (widget.miniatura != null)
-          Image.memory(widget.miniatura!, fit: BoxFit.cover)
-        else
-          Container(color: const Color(0xFF1B1F2A)),
-        if (!_fallo) const Center(child: CircularProgressIndicator()),
-      ],
     );
   }
 }
