@@ -57,7 +57,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
   List<AssetEntity> _todas = [];
   List<AssetEntity> _pendientes = [];
 
-  // Listas separadas por tipo
   final Map<Medio, Set<String>> _borrar = {
     Medio.imagen: {},
     Medio.video: {},
@@ -100,7 +99,6 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
           (prefs.getStringList(_clave('favoritos', m)) ?? []).toSet();
     }
 
-    // Migración: lo guardado antes (sin separar) pasa a Imágenes
     final viejasGuardadas = prefs.getStringList('slider_guardadas');
     if (viejasGuardadas != null && viejasGuardadas.isNotEmpty) {
       _guardadas[Medio.imagen]!.addAll(viejasGuardadas);
@@ -635,7 +633,11 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
           else
             const Center(child: CircularProgressIndicator()),
           if (esVideo && esActual)
-            TarjetaVideo(key: ValueKey(asset.id), asset: asset),
+            TarjetaVideo(
+              key: ValueKey(asset.id),
+              asset: asset,
+              miniatura: datos,
+            ),
           if (esVideo)
             Positioned(
               top: 16,
@@ -749,8 +751,13 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
 
 class TarjetaVideo extends StatefulWidget {
   final AssetEntity asset;
+  final Uint8List? miniatura;
 
-  const TarjetaVideo({super.key, required this.asset});
+  const TarjetaVideo({
+    super.key,
+    required this.asset,
+    this.miniatura,
+  });
 
   @override
   State<TarjetaVideo> createState() => _TarjetaVideoState();
@@ -759,6 +766,7 @@ class TarjetaVideo extends StatefulWidget {
 class _TarjetaVideoState extends State<TarjetaVideo> {
   VideoPlayerController? _ctrl;
   bool _listo = false;
+  bool _fallo = false;
 
   @override
   void initState() {
@@ -767,28 +775,36 @@ class _TarjetaVideoState extends State<TarjetaVideo> {
   }
 
   Future<void> _preparar() async {
-    final File? archivo = await widget.asset.file;
-    if (archivo == null || !mounted) return;
-
-    final ctrl = VideoPlayerController.file(archivo);
     try {
+      final File? archivo = await widget.asset.file;
+      if (archivo == null || !mounted) {
+        _marcarFallo();
+        return;
+      }
+
+      final ctrl = VideoPlayerController.file(archivo);
       await ctrl.initialize();
       await ctrl.setVolume(0);
       await ctrl.setLooping(true);
       await ctrl.play();
+
+      if (!mounted) {
+        ctrl.dispose();
+        return;
+      }
+
+      setState(() {
+        _ctrl = ctrl;
+        _listo = true;
+      });
     } catch (_) {
-      return;
+      _marcarFallo();
     }
+  }
 
-    if (!mounted) {
-      ctrl.dispose();
-      return;
-    }
-
-    setState(() {
-      _ctrl = ctrl;
-      _listo = true;
-    });
+  void _marcarFallo() {
+    if (!mounted) return;
+    setState(() => _fallo = true);
   }
 
   @override
@@ -799,15 +815,26 @@ class _TarjetaVideoState extends State<TarjetaVideo> {
 
   @override
   Widget build(BuildContext context) {
-    if (!_listo || _ctrl == null) return const SizedBox();
+    if (_listo && _ctrl != null) {
+      return FittedBox(
+        fit: BoxFit.cover,
+        child: SizedBox(
+          width: _ctrl!.value.size.width,
+          height: _ctrl!.value.size.height,
+          child: VideoPlayer(_ctrl!),
+        ),
+      );
+    }
 
-    return FittedBox(
-      fit: BoxFit.cover,
-      child: SizedBox(
-        width: _ctrl!.value.size.width,
-        height: _ctrl!.value.size.height,
-        child: VideoPlayer(_ctrl!),
-      ),
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (widget.miniatura != null)
+          Image.memory(widget.miniatura!, fit: BoxFit.cover)
+        else
+          Container(color: const Color(0xFF1B1F2A)),
+        if (!_fallo) const Center(child: CircularProgressIndicator()),
+      ],
     );
   }
 }
