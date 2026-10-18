@@ -10,6 +10,8 @@ workflows:
         script: flutter create --platforms=android .
       - name: Obtener paquetes
         script: flutter pub get
+      - name: Generar icono de la app
+        script: dart run flutter_launcher_icons
       - name: Construir APK debug
         script: flutter build apk --debug
     artifacts:
