@@ -767,6 +767,7 @@ class _TarjetaVideoState extends State<TarjetaVideo> {
   VideoPlayerController? _ctrl;
   bool _listo = false;
   bool _fallo = false;
+  bool _cancelado = false;
 
   @override
   void initState() {
@@ -775,21 +776,31 @@ class _TarjetaVideoState extends State<TarjetaVideo> {
   }
 
   Future<void> _preparar() async {
+    await Future.delayed(const Duration(milliseconds: 500));
+    if (_cancelado || !mounted) return;
+
+    VideoPlayerController? ctrl;
     try {
       final File? archivo = await widget.asset.file;
-      if (archivo == null || !mounted) {
+      if (_cancelado || !mounted || archivo == null) {
         _marcarFallo();
         return;
       }
 
-      final ctrl = VideoPlayerController.file(archivo);
+      ctrl = VideoPlayerController.file(archivo);
       await ctrl.initialize();
+
+      if (_cancelado || !mounted) {
+        await ctrl.dispose();
+        return;
+      }
+
       await ctrl.setVolume(0);
       await ctrl.setLooping(true);
       await ctrl.play();
 
-      if (!mounted) {
-        ctrl.dispose();
+      if (_cancelado || !mounted) {
+        await ctrl.dispose();
         return;
       }
 
@@ -798,18 +809,21 @@ class _TarjetaVideoState extends State<TarjetaVideo> {
         _listo = true;
       });
     } catch (_) {
+      await ctrl?.dispose();
       _marcarFallo();
     }
   }
 
   void _marcarFallo() {
-    if (!mounted) return;
+    if (_cancelado || !mounted) return;
     setState(() => _fallo = true);
   }
 
   @override
   void dispose() {
+    _cancelado = true;
     _ctrl?.dispose();
+    _ctrl = null;
     super.dispose();
   }
 
