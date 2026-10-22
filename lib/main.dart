@@ -243,6 +243,17 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
     return true;
   }
 
+  Future<void> _abrirPantallaCompleta(AssetEntity asset) async {
+    final decision = await Navigator.of(context).push<CardSwiperDirection>(
+      MaterialPageRoute(
+        builder: (_) => VisorPantallaCompleta(asset: asset),
+      ),
+    );
+    if (decision != null && mounted) {
+      _controlador.swipe(decision);
+    }
+  }
+
   Future<void> _quitarDeLista(AssetEntity asset, Seccion s, Medio m) async {
     final ok = await showDialog<bool>(
       context: context,
@@ -508,7 +519,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           child: Text(
-            '${_pendientes.length} pendientes',
+            '${_pendientes.length} pendientes  ·  Tocá para ver en grande',
             style: const TextStyle(color: Colors.white70),
           ),
         ),
@@ -622,7 +633,7 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
     final esActual = index == _indiceActual;
     final datos = _imagenesCache[asset.id];
 
-    return ClipRRect(
+    final contenido = ClipRRect(
       borderRadius: BorderRadius.circular(24),
       child: Stack(
         fit: StackFit.expand,
@@ -672,6 +683,14 @@ class _PantallaPrincipalState extends State<PantallaPrincipal> {
         ],
       ),
     );
+
+    if (esActual) {
+      return GestureDetector(
+        onTap: () => _abrirPantallaCompleta(asset),
+        child: contenido,
+      );
+    }
+    return contenido;
   }
 
   String _duracion(int segundos) {
@@ -850,5 +869,273 @@ class _TarjetaVideoState extends State<TarjetaVideo> {
         if (!_fallo) const Center(child: CircularProgressIndicator()),
       ],
     );
+  }
+}
+
+// ----------------- Visor a pantalla completa -----------------
+
+class VisorPantallaCompleta extends StatelessWidget {
+  final AssetEntity asset;
+
+  const VisorPantallaCompleta({super.key, required this.asset});
+
+  @override
+  Widget build(BuildContext context) {
+    final esVideo = asset.type == AssetType.video;
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: esVideo
+                  ? VisorVideo(asset: asset)
+                  : VisorImagen(asset: asset),
+            ),
+            Positioned(
+              top: 8,
+              left: 8,
+              child: _circulo(
+                icono: Icons.close,
+                color: Colors.white,
+                onTap: () => Navigator.pop(context),
+              ),
+            ),
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 24,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  _botonDecision(Icons.delete_outline, Colors.redAccent,
+                      () => Navigator.pop(context, CardSwiperDirection.left)),
+                  _botonDecision(Icons.star_outline, Colors.amber,
+                      () => Navigator.pop(context, CardSwiperDirection.top)),
+                  _botonDecision(Icons.check, Colors.greenAccent,
+                      () => Navigator.pop(context, CardSwiperDirection.right)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _circulo({
+    required IconData icono,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 44,
+        height: 44,
+        decoration: const BoxDecoration(
+          shape: BoxShape.circle,
+          color: Colors.black54,
+        ),
+        child: Icon(icono, color: color, size: 26),
+      ),
+    );
+  }
+
+  Widget _botonDecision(IconData icono, Color color, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 62,
+        height: 62,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: Colors.black.withOpacity(0.55),
+          border: Border.all(color: color, width: 2),
+        ),
+        child: Icon(icono, color: color, size: 30),
+      ),
+    );
+  }
+}
+
+class VisorImagen extends StatelessWidget {
+  final AssetEntity asset;
+
+  const VisorImagen({super.key, required this.asset});
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<File?>(
+      future: asset.file,
+      builder: (context, snap) {
+        if (snap.connectionState != ConnectionState.done) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snap.data == null) {
+          return const Center(
+            child: Text('No se pudo abrir la imagen.',
+                style: TextStyle(color: Colors.white70)),
+          );
+        }
+        return InteractiveViewer(
+          minScale: 1.0,
+          maxScale: 5.0,
+          child: Center(
+            child: Image.file(snap.data!, fit: BoxFit.contain),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class VisorVideo extends StatefulWidget {
+  final AssetEntity asset;
+
+  const VisorVideo({super.key, required this.asset});
+
+  @override
+  State<VisorVideo> createState() => _VisorVideoState();
+}
+
+class _VisorVideoState extends State<VisorVideo> {
+  VideoPlayerController? _ctrl;
+  bool _listo = false;
+  bool _fallo = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _preparar();
+  }
+
+  Future<void> _preparar() async {
+    try {
+      final File? archivo = await widget.asset.file;
+      if (!mounted || archivo == null) {
+        setState(() => _fallo = true);
+        return;
+      }
+      final ctrl = VideoPlayerController.file(archivo);
+      await ctrl.initialize();
+      if (!mounted) {
+        await ctrl.dispose();
+        return;
+      }
+      await ctrl.setVolume(1.0);
+      await ctrl.setLooping(false);
+      await ctrl.play();
+      setState(() {
+        _ctrl = ctrl;
+        _listo = true;
+      });
+      ctrl.addListener(() {
+        if (mounted) setState(() {});
+      });
+    } catch (_) {
+      if (mounted) setState(() => _fallo = true);
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl?.dispose();
+    super.dispose();
+  }
+
+  void _playPause() {
+    final c = _ctrl;
+    if (c == null) return;
+    setState(() {
+      if (c.value.isPlaying) {
+        c.pause();
+      } else {
+        c.play();
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_fallo) {
+      return const Center(
+        child: Text('No se pudo reproducir el video.',
+            style: TextStyle(color: Colors.white70)),
+      );
+    }
+    if (!_listo || _ctrl == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    final c = _ctrl!;
+    return Stack(
+      children: [
+        Center(
+          child: AspectRatio(
+            aspectRatio: c.value.aspectRatio,
+            child: GestureDetector(
+              onTap: _playPause,
+              child: VideoPlayer(c),
+            ),
+          ),
+        ),
+        Center(
+          child: GestureDetector(
+            onTap: _playPause,
+            child: Container(
+              decoration: const BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.black38,
+              ),
+              padding: const EdgeInsets.all(12),
+              child: Icon(
+                c.value.isPlaying ? Icons.pause : Icons.play_arrow,
+                color: Colors.white,
+                size: 48,
+              ),
+            ),
+          ),
+        ),
+        Positioned(
+          left: 16,
+          right: 16,
+          bottom: 100,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              VideoProgressIndicator(
+                c,
+                allowScrubbing: true,
+                colors: const VideoProgressColors(
+                  playedColor: Colors.amber,
+                  bufferedColor: Colors.white24,
+                  backgroundColor: Colors.white12,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(_fmt(c.value.position),
+                      style: const TextStyle(
+                          color: Colors.white70, fontSize: 12)),
+                  Text(_fmt(c.value.duration),
+                      style: const TextStyle(
+                          color: Colors.white70, fontSize: 12)),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _fmt(Duration d) {
+    final m = d.inMinutes;
+    final s = d.inSeconds % 60;
+    return '$m:${s.toString().padLeft(2, '0')}';
   }
 }
